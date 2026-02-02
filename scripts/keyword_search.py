@@ -1,8 +1,28 @@
 """Keyword matching and result handling."""
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def normalize_text(text: str) -> str:
+    """
+    Normalize text by removing diacritics for comparison.
+
+    Converts characters like 'ș', 'ț', 'ă', 'â', 'î' to their base forms
+    ('s', 't', 'a', 'a', 'i') to enable diacritic-insensitive matching.
+
+    Args:
+        text: Text to normalize
+
+    Returns:
+        Text with diacritics removed
+    """
+    # NFD decomposes characters (e.g., 'ș' -> 's' + combining cedilla)
+    # Then we remove all combining marks (diacritics)
+    normalized = unicodedata.normalize('NFD', text)
+    return ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
 
 
 @dataclass
@@ -42,6 +62,9 @@ def search_text(
     """
     Find keyword matches in text with surrounding context.
 
+    Matching is case-insensitive and diacritic-insensitive, so searching for
+    "timisoara" will match "Timișoara", "TIMISOARA", "tiMiSoara", etc.
+
     Args:
         text: Text to search
         keywords: List of keywords to find
@@ -51,12 +74,17 @@ def search_text(
         List of (keyword, context) tuples
     """
     matches = []
-    text_lower = text.lower()
+    # Normalize text for diacritic-insensitive comparison
+    text_normalized = normalize_text(text).lower()
 
     for keyword in keywords:
-        # Find all occurrences
-        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-        for match in pattern.finditer(text):
+        # Normalize keyword for matching
+        keyword_normalized = normalize_text(keyword).lower()
+        # Find all occurrences in normalized text
+        pattern = re.compile(re.escape(keyword_normalized), re.IGNORECASE)
+        for match in pattern.finditer(text_normalized):
+            # Use match positions to extract context from original text
+            # (preserving original characters including diacritics)
             start = max(0, match.start() - context_chars)
             end = min(len(text), match.end() + context_chars)
             context = text[start:end].replace("\n", " ").strip()
