@@ -39,7 +39,7 @@ DELAYS = {
 MAX_RETRIES = 3
 
 # Default keywords
-DEFAULT_KEYWORDS = ["Romania", "Romanian"]
+DEFAULT_KEYWORDS = ["Timisoara", "Iasi", "Cluj", "Craiova", "Bucharest", "Bucuresti", "Romania", "Romanian"]
 
 # Output paths
 BASE_DIR = Path(__file__).parent

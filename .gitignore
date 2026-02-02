@@ -4,6 +4,7 @@ DS-*/
 # Output files
 scripts/output/*.csv
 scripts/output/files/*.pdf
+doj_parser/output
 
 # macOS
 .DS_Store

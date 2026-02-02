@@ -61,6 +61,7 @@ def main():
     print("=" * 60)
 
     total_results = 0
+    downloader = None
 
     with DOJCrawler(headless=args.headless) as crawler:
         with ResultWriter(args.output) as writer:
@@ -68,6 +69,10 @@ def main():
             crawler.navigate_to_search()
             crawler.handle_not_a_robot()
             crawler.handle_age_verification()
+
+            # Initialize downloader with crawler for browser-based downloads
+            if not args.skip_download:
+                downloader = PDFDownloader(crawler=crawler)
 
             # Process each keyword
             for keyword in args.keywords:
@@ -80,30 +85,20 @@ def main():
                     writer.write(result)
                     keyword_count += 1
 
+                    # Download PDF immediately after finding result
+                    if downloader:
+                        downloader.download(result.pdf_url, result.filename)
+
                 print(f"Found {keyword_count} results for '{keyword}'")
                 total_results += keyword_count
-
-            # Download PDFs if not skipped
-            if not args.skip_download:
-                pdf_queue = crawler.get_pdf_queue()
-                if pdf_queue:
-                    print(f"\n{'='*40}")
-                    print(f"Downloading {len(pdf_queue)} PDFs...")
-                    print("=" * 40)
-
-                    downloader = PDFDownloader()
-                    for i, (url, folder, filename) in enumerate(pdf_queue, 1):
-                        print(f"  [{i}/{len(pdf_queue)}] {filename}")
-                        downloader.download(url, filename)
-
-                    print(f"\nDownload summary: {downloader.summary()}")
 
     print(f"\n{'='*60}")
     print("SUMMARY")
     print("=" * 60)
     print(f"Total results: {total_results}")
     print(f"CSV saved to: {args.output}")
-    if not args.skip_download:
+    if downloader:
+        print(f"Downloads: {downloader.summary()}")
         print(f"PDFs saved to: {OUTPUT_DIR / 'pdfs'}")
     print("=" * 60)
 

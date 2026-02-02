@@ -1,7 +1,9 @@
 """Core Selenium crawler for DOJ Epstein Library."""
 
+import base64
 import re
 import time
+from pathlib import Path
 from typing import Generator
 
 from selenium import webdriver
@@ -27,7 +29,6 @@ class DOJCrawler:
     def __init__(self, headless: bool = False):
         self.headless = headless
         self.driver = None
-        self._pdf_queue: list[tuple[str, str, str]] = []  # (url, folder, filename)
 
     def __enter__(self) -> "DOJCrawler":
         self._init_driver()
@@ -144,6 +145,16 @@ class DOJCrawler:
                 return total, (total + 9) // 10  # Default to 10 per page
         except NoSuchElementException:
             pass
+
+        # Fallback: count result items directly if pagination label is empty/missing
+        # This handles cases with few results where no pagination is shown
+        try:
+            items = self.driver.find_elements(By.CSS_SELECTOR, SELECTORS["result_item"])
+            if items:
+                return len(items), 1
+        except NoSuchElementException:
+            pass
+
         return 0, 0
 
     def _parse_result_item(self, item, keyword: str, page: int) -> CrawlResult | None:
@@ -193,18 +204,35 @@ class DOJCrawler:
         return results
 
     def _click_next_page(self) -> bool:
-        """Click the Next page link. Returns True if successful."""
-        try:
-            next_link = self.driver.find_element(By.CSS_SELECTOR, SELECTORS["next_page"])
-            if next_link.is_displayed():
+        """Click the Next page link. Returns True if successful.
+
+        Uses retry logic to handle stale element references that can occur
+        when the DOM updates between finding and clicking the element.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Re-find the element fresh on each attempt to avoid stale references
+                next_link = self.driver.find_element(By.CSS_SELECTOR, SELECTORS["next_page"])
+                if not next_link.is_displayed():
+                    return False
                 # Scroll to the pagination area first
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", next_link)
                 time.sleep(0.3)
+                # Re-find again right before clicking to minimize stale reference window
+                next_link = self.driver.find_element(By.CSS_SELECTOR, SELECTORS["next_page"])
                 # Click using JavaScript to avoid interception
                 self.driver.execute_script("arguments[0].click();", next_link)
                 return True
-        except NoSuchElementException:
-            pass
+            except StaleElementReferenceException:
+                if attempt < max_retries - 1:
+                    print(f"    Stale element, retrying... (attempt {attempt + 2}/{max_retries})")
+                    time.sleep(0.5)
+                else:
+                    print("    Failed to click next page after retries.")
+                    return False
+            except NoSuchElementException:
+                return False
         return False
 
     def _has_next_page(self) -> bool:
@@ -212,8 +240,20 @@ class DOJCrawler:
         try:
             next_link = self.driver.find_element(By.CSS_SELECTOR, SELECTORS["next_page"])
             return next_link.is_displayed()
-        except NoSuchElementException:
+        except (NoSuchElementException, StaleElementReferenceException):
             return False
+
+    def _wait_for_results_to_load(self):
+        """Wait for the results container to be present and stable."""
+        try:
+            wait = WebDriverWait(self.driver, TIMEOUTS["element_wait"])
+            wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, SELECTORS["results_container"]))
+            )
+            # Additional small wait for DOM to stabilize
+            time.sleep(0.5)
+        except TimeoutException:
+            print("    Warning: Timeout waiting for results to load")
 
     def crawl_keyword(self, keyword: str) -> Generator[CrawlResult, None, None]:
         """Crawl all results for a keyword, yielding each result."""
@@ -231,15 +271,14 @@ class DOJCrawler:
         while True:
             print(f"  Processing page {page}...")
 
-            # Wait for results to be present
-            time.sleep(0.5)
+            # Wait for results to be present and stable
+            self._wait_for_results_to_load()
 
             # Extract results from current page
             results = self.extract_results(keyword, page)
             for result in results:
                 if result.filename not in seen_filenames:
                     seen_filenames.add(result.filename)
-                    self._pdf_queue.append((result.pdf_url, result.folder, result.filename))
                     yield result
 
             print(f"    Found {len(results)} results on page {page} ({len(seen_filenames)} total)")
@@ -254,14 +293,79 @@ class DOJCrawler:
                 print(f"  Failed to click next page. Stopping at page {page}.")
                 break
 
-            # Wait for new page to load
+            # Wait for new page to load with explicit wait
             time.sleep(DELAYS["page_navigation"])
             page += 1
 
-    def get_pdf_queue(self) -> list[tuple[str, str, str]]:
-        """Return the queued PDFs for download."""
-        return self._pdf_queue
+    def get_cookies(self) -> dict[str, str]:
+        """Get cookies from the browser session for use in requests."""
+        cookies = {}
+        if self.driver:
+            for cookie in self.driver.get_cookies():
+                cookies[cookie["name"]] = cookie["value"]
+        return cookies
 
-    def clear_pdf_queue(self):
-        """Clear the PDF download queue."""
-        self._pdf_queue = []
+    def download_pdf(self, url: str, filepath: Path) -> bool:
+        """Download a PDF using the browser's authenticated session.
+
+        Uses JavaScript fetch to download through the browser, preserving
+        all session cookies and authentication state.
+        """
+        try:
+            # Use JavaScript fetch to download the PDF through the browser
+            script = """
+            const url = arguments[0];
+            const callback = arguments[1];
+
+            fetch(url, {
+                method: 'GET',
+                credentials: 'include'
+            })
+            .then(response => {
+                if (!response.ok) {
+                    callback({error: 'HTTP ' + response.status + ': ' + response.statusText});
+                    return;
+                }
+                return response.blob();
+            })
+            .then(blob => {
+                if (!blob) return;
+                const reader = new FileReader();
+                reader.onloadend = function() {
+                    callback({data: reader.result});
+                };
+                reader.readAsDataURL(blob);
+            })
+            .catch(err => {
+                callback({error: err.toString()});
+            });
+            """
+
+            # Execute async JavaScript and wait for callback
+            result = self.driver.execute_async_script(script, url)
+
+            if result.get("error"):
+                print(f"  Browser fetch error: {result['error']}")
+                return False
+
+            # Extract base64 data from data URL
+            data_url = result.get("data", "")
+            if not data_url.startswith("data:"):
+                print(f"  Invalid response format")
+                return False
+
+            # Parse the data URL: data:application/pdf;base64,XXXX
+            base64_data = data_url.split(",", 1)[1]
+            pdf_bytes = base64.b64decode(base64_data)
+
+            # Verify it's actually a PDF
+            if not pdf_bytes.startswith(b"%PDF"):
+                print(f"  Warning: Downloaded content is not a PDF")
+                return False
+
+            filepath.write_bytes(pdf_bytes)
+            return True
+
+        except Exception as e:
+            print(f"  Browser download error: {e}")
+            return False
