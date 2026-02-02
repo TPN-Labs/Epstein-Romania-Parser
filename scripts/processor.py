@@ -5,7 +5,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
 
-from pdf_parser import extract_pages_as_images
+from pdf_parser import extract_text_direct, extract_pages_as_images
 from ocr_processor import process_pdf_pages
 from keyword_search import search_text, SearchResult
 from progress import ProgressBar
@@ -35,7 +35,7 @@ def find_pdfs(folder: Path) -> list[Path]:
 
 def process_pdf(pdf_path: Path, folder_name: str, keywords: list[str]) -> list[SearchResult]:
     """
-    Process a single PDF: extract images, OCR, and search for keywords.
+    Process a single PDF: extract text (fast) or OCR (slow fallback).
 
     Returns:
         List of SearchResult objects
@@ -43,8 +43,13 @@ def process_pdf(pdf_path: Path, folder_name: str, keywords: list[str]) -> list[S
     results = []
 
     try:
-        images = extract_pages_as_images(str(pdf_path))
-        page_texts = process_pdf_pages(images)
+        # Fast path: try direct text extraction first
+        page_texts = extract_text_direct(str(pdf_path))
+
+        # Slow path: fall back to OCR only if needed
+        if page_texts is None:
+            images = extract_pages_as_images(str(pdf_path))
+            page_texts = process_pdf_pages(images)
 
         for page_num, text in enumerate(page_texts, start=1):
             matches = search_text(text, keywords)

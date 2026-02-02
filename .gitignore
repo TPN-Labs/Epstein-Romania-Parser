@@ -3,6 +3,7 @@ DS-*/
 
 # Output files
 scripts/output/*.csv
+scripts/output/files/*.pdf
 
 # macOS
 .DS_Store
@@ -16,3 +17,5 @@ venv/
 
 # Archives
 *.zip
+
+.idea
