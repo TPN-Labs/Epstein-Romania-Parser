@@ -3,11 +3,11 @@ romanian
 +40
 0040 
 .ro 
-RON
 Lei
+RON
+CIF
 CNP
 CUI
-CIF
 fete
 fetite
 studente

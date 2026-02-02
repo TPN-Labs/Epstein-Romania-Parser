@@ -80,8 +80,9 @@ def search_text(
     for keyword in keywords:
         # Normalize keyword for matching
         keyword_normalized = normalize_text(keyword).lower()
-        # Find all occurrences in normalized text
-        pattern = re.compile(re.escape(keyword_normalized), re.IGNORECASE)
+        # Find all occurrences in normalized text (whole words only)
+        # Use word boundaries to avoid matching inside other words (e.g., "arad" in "paradigm")
+        pattern = re.compile(r'\b' + re.escape(keyword_normalized) + r'\b', re.IGNORECASE)
         for match in pattern.finditer(text_normalized):
             # Use match positions to extract context from original text
             # (preserving original characters including diacritics)
