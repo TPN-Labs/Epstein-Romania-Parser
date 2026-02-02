@@ -5,6 +5,12 @@ romanian
 .ro 
 RON
 Lei
+CNP
+CUI
+CIF
+fete
+fetite
+studente
 bucuresti
 bucharest
 cluj-napoca
