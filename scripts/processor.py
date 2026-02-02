@@ -12,11 +12,20 @@ from progress import ProgressBar
 from result_writer import StreamingResultWriter
 
 
+# Global variable for worker processes - initialized once per worker
+_worker_keywords: list[str] = []
+
+
+def _init_worker(keywords: list[str]) -> None:
+    """Initialize worker process with shared keywords."""
+    global _worker_keywords
+    _worker_keywords = keywords
+
+
 class PdfTask(NamedTuple):
     """Represents a PDF processing task."""
     pdf_path: Path
     folder_name: str
-    keywords: list[str]
 
 
 def find_pdfs(folder: Path) -> list[Path]:
@@ -56,12 +65,13 @@ def process_pdf(pdf_path: Path, folder_name: str, keywords: list[str]) -> list[S
 def process_pdf_task(task: PdfTask) -> tuple[list[SearchResult], str | None]:
     """
     Worker function for multiprocessing.
+    Uses globally initialized keywords to avoid serialization overhead.
 
     Returns:
         Tuple of (results, error_message or None)
     """
     try:
-        results = process_pdf(task.pdf_path, task.folder_name, task.keywords)
+        results = process_pdf(task.pdf_path, task.folder_name, _worker_keywords)
         return results, None
     except Exception as e:
         return [], f"{task.pdf_path.name}: {e}"
@@ -88,41 +98,68 @@ def process_folder(
     completed = 0
     start_time = time.time()
 
-    tasks = [PdfTask(pdf, folder.name, keywords) for pdf in pdfs]
+    tasks = [PdfTask(pdf, folder.name) for pdf in pdfs]
     progress = ProgressBar(total=len(pdfs), workers=num_workers)
 
     print(f"\n{folder.name}: Processing {len(pdfs)} PDFs with {num_workers} workers...")
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(process_pdf_task, t): t for t in tasks}
+    # Use initializer to pass keywords once per worker process (not per task)
+    with ProcessPoolExecutor(
+        max_workers=num_workers,
+        initializer=_init_worker,
+        initargs=(keywords,)
+    ) as executor:
+        # Submit tasks in chunks to reduce memory pressure
+        futures_map: dict = {}
+        task_iter = iter(tasks)
+        batch_size = num_workers * 4  # Keep workers fed without overwhelming memory
 
-        for future in as_completed(futures):
-            task = futures[future]
-            completed += 1
+        # Initial batch submission
+        for task in [next(task_iter, None) for _ in range(batch_size)]:
+            if task is not None:
+                future = executor.submit(process_pdf_task, task)
+                futures_map[future] = task
 
-            try:
-                results, error = future.result()
-                new_matches = None
+        while futures_map:
+            # Wait for any future to complete
+            done_futures = []
+            for future in as_completed(futures_map):
+                done_futures.append(future)
+                break  # Process one at a time to submit new tasks
 
-                if results:
-                    writer.write(results)
-                    match_count += len(results)
-                    new_matches = [(r.keyword, r.context, r.filename) for r in results]
+            for future in done_futures:
+                task = futures_map.pop(future)
+                completed += 1
 
-                if error:
-                    errors.append(error)
+                try:
+                    results, error = future.result()
+                    new_matches = None
 
-            except Exception as e:
-                errors.append(f"{task.pdf_path.name}: {e}")
-                new_matches = None
+                    if results:
+                        writer.write(results)
+                        match_count += len(results)
+                        new_matches = [(r.keyword, r.context, r.filename) for r in results]
 
-            progress.update(
-                current=completed,
-                filename=task.pdf_path.name,
-                elapsed=time.time() - start_time,
-                matches=writer.count,
-                new_matches=new_matches
-            )
+                    if error:
+                        errors.append(error)
+
+                except Exception as e:
+                    errors.append(f"{task.pdf_path.name}: {e}")
+                    new_matches = None
+
+                progress.update(
+                    current=completed,
+                    filename=task.pdf_path.name,
+                    elapsed=time.time() - start_time,
+                    matches=writer.count,
+                    new_matches=new_matches
+                )
+
+                # Submit next task to keep workers busy
+                next_task = next(task_iter, None)
+                if next_task is not None:
+                    new_future = executor.submit(process_pdf_task, next_task)
+                    futures_map[new_future] = next_task
 
     progress.finish()
     return match_count, len(pdfs), errors
