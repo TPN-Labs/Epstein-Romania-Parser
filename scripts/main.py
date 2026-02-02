@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
-"""Main entry point for PDF keyword parsing."""
+"""Main entry point for PDF keyword parsing with multithreading support."""
 
 import csv
+import os
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count
 from pathlib import Path
+from typing import NamedTuple
 
 from pdf_parser import extract_pages_as_images
 from ocr_processor import process_pdf_pages
 from keyword_search import load_keywords, search_text, SearchResult
+
+
+# Default number of workers - use CPU count, leaving 1-2 cores free for system
+DEFAULT_WORKERS = max(1, cpu_count() - 2)
+
+
+class PdfTask(NamedTuple):
+    """Represents a PDF processing task."""
+    pdf_path: Path
+    folder_name: str
+    keywords: list[str]
 
 
 def find_ds_folders(base_path: Path) -> list[Path]:
@@ -59,9 +75,27 @@ def process_pdf(
                 ))
 
     except Exception as e:
-        print(f"  Error processing {pdf_path.name}: {e}", file=sys.stderr)
+        # Silently collect errors - will be reported in summary
+        pass
 
     return results
+
+
+def process_pdf_task(task: PdfTask) -> tuple[list[SearchResult], str | None]:
+    """
+    Worker function for processing a PDF in a separate process.
+
+    Args:
+        task: PdfTask containing path, folder name, and keywords
+
+    Returns:
+        Tuple of (results list, error message or None)
+    """
+    try:
+        results = process_pdf(task.pdf_path, task.folder_name, task.keywords)
+        return results, None
+    except Exception as e:
+        return [], f"{task.pdf_path.name}: {e}"
 
 
 def save_results(results: list[SearchResult], output_path: Path) -> None:
@@ -75,18 +109,126 @@ def save_results(results: list[SearchResult], output_path: Path) -> None:
             writer.writerow([r.folder, r.filename, r.page, r.keyword, r.context])
 
 
-def print_progress(current: int, total: int, filename: str, width: int = 40) -> None:
-    """Print a progress bar."""
+def format_time(seconds: float) -> str:
+    """Format seconds into human-readable time."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
+
+
+def print_progress(
+    current: int,
+    total: int,
+    filename: str,
+    elapsed: float,
+    matches: int,
+    width: int = 30,
+    workers: int = 1
+) -> None:
+    """Print a detailed progress bar with stats."""
     percent = current / total if total > 0 else 0
     filled = int(width * percent)
     bar = "█" * filled + "░" * (width - filled)
+
+    # Calculate speed and ETA
+    speed = current / elapsed if elapsed > 0 else 0
+    remaining = total - current
+    eta = remaining / speed if speed > 0 else 0
+
     # Truncate filename if too long
-    display_name = filename[:30] + "..." if len(filename) > 30 else filename
-    print(f"\r  [{bar}] {current}/{total} - {display_name:<35}", end="", flush=True)
+    display_name = filename[:20] + "..." if len(filename) > 20 else filename
+
+    # Build progress line
+    progress_line = (
+        f"\r  [{bar}] {current}/{total} ({percent*100:.0f}%) | "
+        f"{speed:.1f} files/sec | "
+        f"ETA: {format_time(eta)} | "
+        f"Matches: {matches} | "
+        f"Workers: {workers} | "
+        f"{display_name:<23}"
+    )
+
+    print(progress_line, end="", flush=True)
 
 
-def main() -> None:
-    """Main entry point."""
+def process_folder_parallel(
+    folder: Path,
+    keywords: list[str],
+    num_workers: int
+) -> tuple[list[SearchResult], int, list[str]]:
+    """
+    Process all PDFs in a folder using parallel workers.
+
+    Args:
+        folder: Path to folder containing PDFs
+        keywords: Keywords to search for
+        num_workers: Number of parallel workers
+
+    Returns:
+        Tuple of (results, pdf_count, errors)
+    """
+    pdfs = find_pdfs(folder)
+    if not pdfs:
+        return [], 0, []
+
+    all_results: list[SearchResult] = []
+    errors: list[str] = []
+    completed = 0
+    folder_start = time.time()
+
+    # Create tasks for all PDFs
+    tasks = [PdfTask(pdf, folder.name, keywords) for pdf in pdfs]
+
+    print(f"\n{folder.name}: Processing {len(pdfs)} PDF files with {num_workers} workers...")
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks
+        future_to_task = {
+            executor.submit(process_pdf_task, task): task
+            for task in tasks
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            completed += 1
+
+            try:
+                results, error = future.result()
+                all_results.extend(results)
+                if error:
+                    errors.append(error)
+            except Exception as e:
+                errors.append(f"{task.pdf_path.name}: {e}")
+
+            # Update progress
+            elapsed = time.time() - folder_start
+            print_progress(
+                completed, len(pdfs), task.pdf_path.name,
+                elapsed, len(all_results), workers=num_workers
+            )
+
+    print()  # New line after progress bar
+    return all_results, len(pdfs), errors
+
+
+def main(num_workers: int | None = None) -> None:
+    """
+    Main entry point.
+
+    Args:
+        num_workers: Number of parallel workers (default: CPU count - 2)
+    """
+    if num_workers is None:
+        num_workers = DEFAULT_WORKERS
+
     # Determine paths
     script_dir = Path(__file__).parent
     project_root = script_dir.parent  # Where DS-* folders are
@@ -110,27 +252,21 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Found {len(ds_folders)} folder(s): {', '.join(f.name for f in ds_folders)}")
+    print(f"Using {num_workers} parallel workers (CPUs available: {cpu_count()})")
 
-    # Process all PDFs
+    # Process all PDFs in parallel
     all_results: list[SearchResult] = []
     total_pdfs = 0
-    total_pages = 0
+    all_errors: list[str] = []
+    global_start = time.time()
 
     for folder in ds_folders:
-        pdfs = find_pdfs(folder)
-        if not pdfs:
-            print(f"\n{folder.name}: No PDF files found")
-            continue
+        results, pdf_count, errors = process_folder_parallel(folder, keywords, num_workers)
+        all_results.extend(results)
+        total_pdfs += pdf_count
+        all_errors.extend(errors)
 
-        print(f"\n{folder.name}: Processing {len(pdfs)} PDF files...")
-
-        for i, pdf_path in enumerate(pdfs, start=1):
-            print_progress(i, len(pdfs), pdf_path.name)
-            results = process_pdf(pdf_path, folder.name, keywords)
-            all_results.extend(results)
-            total_pdfs += 1
-
-        print()  # New line after progress bar
+    total_time = time.time() - global_start
 
     # Save results
     save_results(all_results, output_path)
@@ -139,10 +275,23 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
+    print(f"Total time:        {format_time(total_time)}")
     print(f"Folders processed: {len(ds_folders)}")
     print(f"PDFs processed:    {total_pdfs}")
+    print(f"Processing speed:  {total_pdfs / total_time:.1f} files/sec")
     print(f"Matches found:     {len(all_results)}")
     print(f"Results saved to:  {output_path}")
+
+    # Report errors if any
+    if all_errors:
+        print(f"\nErrors encountered: {len(all_errors)}")
+        if len(all_errors) <= 10:
+            for err in all_errors:
+                print(f"  - {err}")
+        else:
+            for err in all_errors[:5]:
+                print(f"  - {err}")
+            print(f"  ... and {len(all_errors) - 5} more errors")
 
     # Breakdown by keyword
     if all_results:
@@ -162,4 +311,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="PDF keyword parser with parallel processing"
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of parallel workers (default: {DEFAULT_WORKERS})"
+    )
+    args = parser.parse_args()
+
+    main(num_workers=args.workers)
