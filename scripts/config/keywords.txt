@@ -1,5 +1,10 @@
 romania
 romanian
++40
+0040 
+.ro 
+RON
+Lei
 bucuresti
 bucharest
 cluj-napoca
