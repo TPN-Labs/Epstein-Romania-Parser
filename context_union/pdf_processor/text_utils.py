@@ -62,12 +62,60 @@ def extract_email_addresses(text: str) -> Set[str]:
     return cleaned
 
 
+def fix_date_ocr_errors(date_str: str) -> str:
+    """Fix common OCR errors in date strings."""
+    if not date_str:
+        return date_str
+
+    # Fix letter/number confusions in day positions
+    # "Sep I," -> "Sep 1," (letter I for number 1)
+    # "Sep l," -> "Sep 1," (lowercase L for number 1)
+    date_str = re.sub(r'([A-Za-z]{3,})\s+([Il])\s*,', r'\1 1,', date_str)
+    date_str = re.sub(r'([A-Za-z]{3,})\s+([Il])(\s|$)', r'\1 1\3', date_str)
+
+    # Fix "O" for "0" in dates (e.g., "2OO9" -> "2009", "O1" -> "01")
+    # But be careful not to replace O in month names
+    date_str = re.sub(r'(\d)O', r'\g<1>0', date_str)  # 2O -> 20
+    date_str = re.sub(r'O(\d)', r'0\1', date_str)      # O9 -> 09
+
+    # Fix "S" for "5" (e.g., "200S" -> "2005")
+    date_str = re.sub(r'(\d{3})S(\s|$|,)', r'\g<1>5\2', date_str)
+
+    # Fix "B" for "8" in years
+    date_str = re.sub(r'(\d{2})B(\d)', r'\g<1>8\2', date_str)
+
+    # Fix common month OCR errors
+    date_str = re.sub(r'\blan\b', 'Jan', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bJari\b', 'Jan', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bMar\s*ch\b', 'March', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bApr\s*il\b', 'April', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bJuiy\b', 'July', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bAugust\b', 'August', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bSept\b', 'Sep', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bNov\s*ember\b', 'November', date_str, flags=re.IGNORECASE)
+    date_str = re.sub(r'\bDec\s*ember\b', 'December', date_str, flags=re.IGNORECASE)
+
+    # Fix ":" confused with ";" in times
+    date_str = re.sub(r'(\d{1,2});(\d{2})\s*(AM|PM|am|pm)', r'\1:\2 \3', date_str)
+
+    # Fix spaces in times (e.g., "8: 21" -> "8:21")
+    date_str = re.sub(r'(\d{1,2}):\s+(\d{2})', r'\1:\2', date_str)
+
+    # Fix "l" for "1" in times (e.g., "l2:30" -> "12:30")
+    date_str = re.sub(r'\bl(\d:\d{2})', r'1\1', date_str)
+
+    return date_str
+
+
 def parse_date(date_str: str) -> Optional[datetime]:
     """Parse various date formats found in emails."""
     if not date_str:
         return None
 
     date_str = re.sub(r'\s+', ' ', date_str.strip())
+
+    # Fix OCR errors before parsing
+    date_str = fix_date_ocr_errors(date_str)
 
     try:
         return date_parser.parse(date_str, fuzzy=True)
@@ -185,6 +233,30 @@ def clean_message_body(body: str) -> str:
     # Remove EFTA references
     body = re.sub(r'EFTA_R\d+_\d+\s*', '', body)
     body = re.sub(r'EFTA\d{8,}\s*', '', body)
+
+    # Remove email confidentiality footers (with or without quote markers)
+    # Pattern for "The information contained in this communication..." footer
+    body = re.sub(
+        r'(?:^>?\s*[w\*]{5,}\s*\n)?'  # Optional asterisk/w line
+        r'(?:^>?\s*)*The information contained in this communication is'
+        r'[\s\S]*?'
+        r'(?:including all attachments|all copies thereof|attachments)\s*\.?',
+        '', body, flags=re.MULTILINE | re.IGNORECASE
+    )
+
+    # Remove lines that are just quote markers and asterisks/w characters
+    body = re.sub(r'^>\s*[w\*]+\s*$', '', body, flags=re.MULTILINE)
+
+    # Remove "property of Jeffrey Epstein" footer fragments
+    body = re.sub(
+        r'(?:^>?\s*)*(?:It is the )?property of\s*\n?(?:^>?\s*)*Jeffrey Epstein[\s\S]*?(?:attachments\.?|thereof[,.])',
+        '', body, flags=re.MULTILINE | re.IGNORECASE
+    )
+
+    # Remove standalone confidentiality fragments that might remain
+    body = re.sub(r'(?:^>?\s*)*and may be unlawful[\s\S]*?attachments\.?', '', body, flags=re.MULTILINE | re.IGNORECASE)
+    body = re.sub(r'(?:^>?\s*)*confidential,?\s*may be attorney-client privileged[\s\S]*?addressee\.?', '', body, flags=re.MULTILINE | re.IGNORECASE)
+    body = re.sub(r'(?:^>?\s*)*If you have received this[\s\S]*?(?:attachments\.?|thereof[,.])', '', body, flags=re.MULTILINE | re.IGNORECASE)
 
     # Clean up multiple blank lines
     body = re.sub(r'\n{3,}', '\n\n', body)

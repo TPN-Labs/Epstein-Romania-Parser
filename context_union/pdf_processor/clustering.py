@@ -205,39 +205,66 @@ def deduplicate_messages(messages: List[EmailMessage]) -> List[EmailMessage]:
     if not messages:
         return []
 
+    def normalize_body(body: str) -> str:
+        """Normalize message body for comparison."""
+        if not body:
+            return ""
+        text = body.strip()
+        # Remove quote markers
+        text = re.sub(r'^>+\s*', '', text, flags=re.MULTILINE)
+        # Remove "On ... wrote:" lines
+        text = re.sub(r'On\s+[\w,\s]+\d{4}.*?wrote:', '', text, flags=re.IGNORECASE | re.DOTALL)
+        # Remove subject lines
+        text = re.sub(r'^Subject\s*:?\s*Re:?\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip().lower()
+        # Remove punctuation for fuzzy matching
+        text = re.sub(r'[^\w\s]', '', text)
+        return text
+
     unique = []
-    seen_sigs = set()
+    seen_bodies = []  # Store (normalized_body, original_msg) tuples
 
     for msg in messages:
         if not msg.body:
             continue
 
-        body_clean = msg.body.strip()
-        body_clean = re.sub(r'^>.*$', '', body_clean, flags=re.MULTILINE)
-        body_clean = re.sub(r'On\s+[\w,\s]+\d{4}.*?wrote:', '', body_clean, flags=re.IGNORECASE | re.DOTALL)
-        body_clean = re.sub(r'^Subject\s*Re:?\s*', '', body_clean, flags=re.MULTILINE | re.IGNORECASE)
-        body_clean = re.sub(r'\s+', ' ', body_clean).strip().lower()
+        body_norm = normalize_body(msg.body)
 
-        if len(body_clean) < 100:
-            body_sig = body_clean
-        else:
-            body_sig = body_clean[:100]
-
-        if not body_sig:
+        if len(body_norm) < 10:
             continue
 
-        if body_sig in seen_sigs:
-            continue
-
+        # Check for exact match first
         is_duplicate = False
-        for existing_sig in list(seen_sigs):
-            if len(body_sig) > 20 and len(existing_sig) > 20:
-                if body_sig in existing_sig or existing_sig in body_sig:
+        for existing_body, existing_msg in seen_bodies:
+            # Exact match
+            if body_norm == existing_body:
+                is_duplicate = True
+                break
+
+            # Substring match (one contains the other)
+            if len(body_norm) > 20 and len(existing_body) > 20:
+                if body_norm in existing_body or existing_body in body_norm:
                     is_duplicate = True
                     break
 
+            # Fuzzy match for similar content (handles OCR differences)
+            if len(body_norm) > 30 and len(existing_body) > 30:
+                # Use the shorter one for comparison
+                shorter = body_norm if len(body_norm) <= len(existing_body) else existing_body
+                longer = existing_body if len(body_norm) <= len(existing_body) else body_norm
+
+                # Check if first 50 chars are very similar (likely same message)
+                similarity = fuzz.ratio(shorter[:50], longer[:50])
+                if similarity > 85:
+                    # Double-check with full text similarity
+                    full_similarity = fuzz.ratio(shorter, longer[:len(shorter) + 20])
+                    if full_similarity > 80:
+                        is_duplicate = True
+                        break
+
         if not is_duplicate:
-            seen_sigs.add(body_sig)
+            seen_bodies.append((body_norm, msg))
             unique.append(msg)
 
     return unique

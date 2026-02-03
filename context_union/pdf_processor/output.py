@@ -138,7 +138,9 @@ def generate_markdown(conversation: Conversation, name_registry: NameRegistry) -
             recipient = format_participant(msg.recipient, name_registry)
             lines.append(f"- **To**: {recipient}")
 
-        if msg.date_str:
+        if msg.date:
+            lines.append(f"- **Date**: {msg.date.strftime('%B %d, %Y at %I:%M %p')}")
+        elif msg.date_str:
             lines.append(f"- **Date**: {msg.date_str}")
 
         lines.append(f"- **Source**: {msg.source_file}")
@@ -195,7 +197,9 @@ def generate_standalone_markdown(doc: Document, doc_id: int, name_registry: Name
                 recipient = format_participant(msg.recipient, name_registry)
                 lines.append(f"- **To**: {recipient}")
 
-            if msg.date_str:
+            if msg.date:
+                lines.append(f"- **Date**: {msg.date.strftime('%B %d, %Y at %I:%M %p')}")
+            elif msg.date_str:
                 lines.append(f"- **Date**: {msg.date_str}")
 
             lines.append("")

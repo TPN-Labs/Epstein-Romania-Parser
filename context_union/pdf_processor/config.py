@@ -18,12 +18,16 @@ MAX_CLUSTER_SIZE = 15
 
 # Junk text patterns to remove from extracted PDF text
 JUNK_PATTERNS = [
-    # Confidentiality disclaimers
+    # Confidentiality disclaimers (with optional quote markers like "> ")
+    r'(?:^>?\s*\*{5,}\s*\n)?(?:^>?\s*)?The information contained in this communication is[\s\S]*?(?:including all attachments|all copies thereof)[\s\S]*?(?:attachments\.?|thereof[,.])',
+    r'(?:^>?\s*)?The information contained in this communication[\s\S]*?destroy this communication[\s\S]*?attachments\.?',
     r'\*{10,}[\s\S]*?The information contained in this communication is[\s\S]*?all rights reserved[\s\S]*?\*{5,}',
-    r'The information contained in this communication is\s*confidential[\s\S]*?including all attachments\.?',
     r'\*{10,}[\s\S]*?confidential[\s\S]*?attachments[\s\S]*?\*{5,}',
     r'Unauthorized use,?\s*disc[\s\S]*?prohibited',
     r'copyright\s*-?\s*all rights reserved',
+    # Quoted confidentiality footers (lines starting with >)
+    r'(?:^>\s*)+\*{5,}[\s\S]*?(?:^>\s*)+attachments\.?',
+    r'(?:^>\s*w{5,}\*{5,}[\s\S]*?)(?=\n(?!>)|$)',
     # Sent from devices
     r'Sent from my iP(?:hone|od|ad)',
     r'Sent from Samsung Mobile',
