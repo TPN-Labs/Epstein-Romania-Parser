@@ -5,6 +5,8 @@ DS-*/
 scripts/output/*.csv
 scripts/output/files/*.pdf
 doj_parser/output
+context_union/pdfs
+context_union/output_report
 
 # macOS
 .DS_Store
